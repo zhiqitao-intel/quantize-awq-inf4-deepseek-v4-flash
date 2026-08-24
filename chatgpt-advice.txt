@@ -1,0 +1,228 @@
+Below is the complete end-to-end AWQ quantization recipe for DeepSeek-V4-Flash-0731.
+
+Prerequisites
+
+Recommended machine:
+
+Linux
+Python 3.11
+512GB+ RAM
+500GB+ free disk
+
+
+The 0731 checkpoint is very large and quantization will not succeed on a typical workstation.
+
+1. Create environment
+conda create -n dsv4-awq python=3.11 -y
+conda activate dsv4-awq
+
+
+Install dependencies:
+
+pip install -U pip
+
+pip install \
+    torch \
+    transformers \
+    accelerate \
+    autoawq \
+    safetensors \
+    huggingface_hub
+
+
+Verify:
+
+python -c "import torch;print(torch.__version__)"
+python -c "import transformers;print(transformers.__version__)"
+
+2. Login to Hugging Face
+huggingface-cli login
+
+
+Paste token.
+
+Verify:
+
+huggingface-cli whoami
+
+3. Download DeepSeek-V4-Flash-0731
+mkdir models
+cd models
+
+huggingface-cli download \
+    deepseek-ai/DeepSeek-V4-Flash-0731 \
+    --local-dir DeepSeek-V4-Flash-0731
+
+
+You should see:
+
+DeepSeek-V4-Flash-0731/
+├── config.json
+├── tokenizer.json
+├── tokenizer_config.json
+├── generation_config.json
+├── model*.safetensors
+└── ...
+
+
+The Hugging Face model page for DeepSeek-V4-Flash-0731 is the 0731 release checkpoint.
+
+4. Create Quantization Script
+
+Create:
+
+quantize_awq.py
+
+
+Contents:
+
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+MODEL_PATH = "./DeepSeek-V4-Flash-0731"
+OUTPUT_PATH = "./DeepSeek-V4-Flash-0731-AWQ"
+
+quant_config = {
+    "w_bit": 4,
+    "q_group_size": 128,
+    "zero_point": True,
+}
+
+print("Loading tokenizer...")
+
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True
+)
+
+print("Loading model...")
+
+model = AutoAWQForCausalLM.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True,
+    low_cpu_mem_usage=True
+)
+
+print("Starting quantization...")
+
+model.quantize(
+    tokenizer,
+    quant_config=quant_config
+)
+
+print("Saving model...")
+
+model.save_quantized(
+    OUTPUT_PATH
+)
+
+tokenizer.save_pretrained(
+    OUTPUT_PATH
+)
+
+print("Done")
+
+5. Run Quantization
+python quantize_awq.py
+
+
+Expected:
+
+Loading tokenizer...
+Loading model...
+Starting quantization...
+Saving model...
+Done
+
+6. Verify Output
+ls DeepSeek-V4-Flash-0731-AWQ
+
+
+Expected:
+
+config.json
+quant_config.json
+generation_config.json
+tokenizer.json
+tokenizer_config.json
+*.safetensors
+
+7. Check Quantization Metadata
+cat DeepSeek-V4-Flash-0731-AWQ/quant_config.json
+
+
+Expected:
+
+{
+  "zero_point": true,
+  "q_group_size": 128,
+  "w_bit": 4
+}
+
+8. Upload to Hugging Face (Optional)
+
+Create repository:
+
+huggingface-cli repo create \
+    DeepSeek-V4-Flash-0731-AWQ
+
+
+Upload:
+
+huggingface-cli upload \
+    yourname/DeepSeek-V4-Flash-0731-AWQ \
+    ./DeepSeek-V4-Flash-0731-AWQ
+
+9. If AutoAWQ Fails
+
+Possible errors:
+
+Unsupported module type
+
+Cannot find linear layers
+
+Unknown DeepSeek architecture
+
+Model type deepseek_v4 not supported
+
+
+If these appear, the current AutoAWQ build does not yet support the DeepSeek-V4-Flash-0731 architecture.
+
+At that point switch to:
+
+pip install llmcompressor
+
+
+or find an existing community W4A16/AWQ conversion. I found evidence of community W4A16 quantization efforts for DeepSeek-V4-Flash, but not an official AWQ release from DeepSeek.
+
+One-Liner Version
+huggingface-cli download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir DeepSeek-V4-Flash-0731
+
+python quantize_awq.py
+
+
+where quantize_awq.py contains:
+
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+m="./DeepSeek-V4-Flash-0731"
+o="./DeepSeek-V4-Flash-0731-AWQ"
+
+tok=AutoTokenizer.from_pretrained(m,trust_remote_code=True)
+model=AutoAWQForCausalLM.from_pretrained(m,trust_remote_code=True)
+
+model.quantize(
+    tok,
+    quant_config={
+        "w_bit":4,
+        "q_group_size":128,
+        "zero_point":True
+    }
+)
+
+model.save_quantized(o)
+tok.save_pretrained(o)
+
+
+One caution: I have not found a source confirming that AutoAWQ currently supports DeepSeek-V4-Flash-0731, so this recipe is the standard AWQ workflow, but actual success depends on architecture support in the version of AutoAWQ you install.

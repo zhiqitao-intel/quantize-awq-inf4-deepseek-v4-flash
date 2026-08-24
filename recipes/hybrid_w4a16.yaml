@@ -1,0 +1,93 @@
+# =============================================================================
+# DeepSeek-V4-Flash-0731 — Hybrid W4A16-AWQ Recipe
+# =============================================================================
+#
+# Companion to IGNORE_PATTERNS_DERIVATION.md. Consumed by:
+#   scripts/quantize_llmcompressor.py --recipe recipes/hybrid_w4a16.yaml
+#
+# Output format: compressed-tensors v0.10 with `quantization_config.format =
+# "int-quantized"` and individual layer schemes recorded per fully-qualified
+# parameter name. Saved by `CompressedTensorsSaveManager` invoked from
+# llmcompressor.transformers.oneshot.
+#
+# Why a YAML recipe and not a Python AWQModifier literal?
+#   - Reviewers can diff ignore patterns / group-size / duo-scaling decisions
+#     without reading Python.
+#   - Allows swapping group-size or num_bits from CI flags without code edits.
+#
+# Pinned defaults correspond to QUANTIZATION_DECISIONS.md:
+#   - duo_scaling=True   (QD-5)
+#   - group_size=128     (QD-6)
+#   - num_bits=4         (chosen)
+#   - symmetric=False    (QD-7)
+# =============================================================================
+
+version: "0.5"
+recipe: "awq-w4a16-hybrid"
+description: >
+  Hybrid W4A16-AWQ recipe for DeepSeek-V4-Flash-0731 (304B MoE).
+  Quantizes every linear (excluding HyperConnection sinkhorn params,
+  router, embeddings, head, compressor norms, attn_sink, hash-routing
+  lookups, DSpark marks, and aped positional encodings) to int4
+  weight-only with group-size 128 and asymmetric zero-points.
+  Activations remain FP16 throughout.
+
+awq_modifier:
+  # Targets: every nn.Linear (or nn.Linear subclass) is eligible.
+  # The custom DeepSeekV4 `Linear` module IS a nn.Linear subclass, so it
+  # qualifies. Excluded qualnames are matched via the `ignore:` list sourced
+  # from recipes/moe_ignore_patterns.txt (loaded by the runner script, not
+  # embedded here to keep the recipe declarative).
+  targets:
+    - "Linear"
+
+  # Bit-width and granularity
+  num_bits: 4                 # QD-W4 selection
+  group_size: 128             # QD-6
+  symmetric: false            # QD-7 (zero_point=True equivalent)
+  strategy: "group"           # per-group axis
+
+  # Calibration algorithm parameters
+  duo_scaling: true           # QD-5
+  max_chunk_size: 2048        # token-chunk size for activation capture
+  alpha_step: 0.1             # grid step for clip-search; 0.1 reproduces
+                              # the original AWQ paper's α-grid choice.
+  ema_alpha: 0.0              # disable EMA decay — fixed-step grid.
+
+  # Observations about calibration set are sourced externally (runner arg).
+  dataset:
+    source: ${DATASET_PATH}     # injected by runner from --dataset arg
+    max_seq_length: ${MAX_SEQ_LENGTH:-2048}
+    num_samples: ${NUM_SAMPLES:-256}
+
+  # Sensitivity overrides (regions deemed catastrophic to W4):
+  #   - Skip the FIRST decoder block entirely on the gating path:
+  #     router weights live in the gate submodule and are excluded by the
+  #     global ignore list, NOT here. Listed here as a sentinel for
+  #     reviewer awareness.
+  #   - Identity: residual connections and norm weights aren't Linear modules,
+  #     so this is informational.
+  sensitivity_overrides:
+    - pattern: "model.layers.0."
+      action: "ignore-all-linear"
+      rationale: >
+        First decoder block has special hand-tuned initialization for
+        hyper-connection sinkhorn matrices. Excluding it wholesale avoids
+        cascading perturbations on hash-routing initialization.
+
+# SequentialModifiers list (only one here; reserved for future extensions):
+modifiers:
+  - awq_modifier
+
+# =============================================================================
+# Save format declaration
+# =============================================================================
+# The compressed-tensors serializer writes `quantization_config.json` with
+# fields consumed by vLLM (`compressed_tensors` loader) and SGLang. The
+# serializer auto-detects targets; we override here to bind `format=int-quantized`
+# and force `kv_cache_scheme=null` (we're W4-weight-only, KV cache stays FP8).
+save_format:
+  format: "int-quantized"
+  kv_cache_scheme: null
+  # Per-target-group granularity preserves per-layer optimization freedom.
+  per_target_quantization: true

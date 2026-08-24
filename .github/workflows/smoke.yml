@@ -1,0 +1,79 @@
+# GitHub Actions Workflow — Surrogate AWQ smoke on every push.
+#
+# Note: heavier integration test (full DeepSeek-V4 quantization) is NOT
+# triggered here — that path requires 200+ GB of GPU RAM and is expected
+# to be driven manually from a sufficiently provisioned runner.
+
+name: smoke
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('env/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip wheel
+          # We deliberately skip the heavyweight installs (torch CUDA wheels,
+          # llmcompressor). Pull only what's necessary for unit-tests + regex
+          # validation; CUDA-enabled wheel is added in `integration-tests` job.
+          pip install pyyaml pytest pytest-timeout safetensors
+
+      - name: Run unit tests (no smoke)
+        run: |
+          python -m pytest -q tests/test_pipeline.py
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install full deps (CPU wheels sufficient for surrogate smoke)
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r env/requirements.txt || true
+          # Make sure llmcompressor is installed even if pinned range misses.
+          pip install 'llmcompressor>=0.7'
+
+      - name: Run smoke driver
+        env:
+          RUN_SMOKE: "1"
+        run: bash ci/run_smoke.sh

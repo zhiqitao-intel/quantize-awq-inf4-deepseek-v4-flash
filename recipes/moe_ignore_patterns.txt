@@ -1,0 +1,77 @@
+# DeepSeek-V4-Flash-0731 — AWQ Ignore Patterns
+# =================================================
+# Companion to IGNORE_PATTERNS_DERIVATION.md. Each non-comment line is a
+# SUBSTRING MATCH against fully-qualified parameter names. Parameters whose
+# FQN contains any of these substrings will be left untouched during the
+# AWQ sweep.
+#
+# Update procedure when this file changes:
+#   1. Edit patterns below.
+#   2. Re-run: python -m tests.test_ignore_pattern_coverage
+#   3. Commit both the file and the regenerated coverage report.
+#
+# Grammar: literal substring, case-sensitive. No regex unless explicitly
+# bracketed (none currently). Comments start with `#`.
+
+# --- 1. RMSNorm weight vectors (FP32 stored, structural) ---
+*.norm.weight
+*.q_norm.weight
+*.kv_norm.weight
+*.attn_norm.weight
+*.ffn_norm.weight
+*.main_norm.weight
+
+# --- 2. Hyperconnection sinkhorn mixers ---
+hc_attn_fn
+hc_attn_base
+hc_attn_scale
+hc_ffn_fn
+hc_ffn_base
+hc_ffn_scale
+hc_head_fn
+hc_head_base
+hc_head_scale
+
+# --- 3. Router / gating ---
+gate.weight
+gate.bias
+gate.tid2eid
+tid2eid
+
+# --- 4. Compressor (KV-cache compressor) sub-modules ---
+compressor.ape
+compressor.wkv
+compressor.wgate
+compressor.norm.weight
+
+# --- 5. Streaming-softmax sinks ---
+attn_sink
+
+# --- 6. Per-block weight scales (paired with quantized linear weights) ---
+.weight.scale
+.scale
+
+# --- 7. Embedding / output head ---
+model.embed.weight
+model.head.weight
+
+# --- 8. DSpark speculative-decoding components ---
+markov_head
+confidence_head
+dspark_head
+main_proj
+main_norm
+
+# --- 9. Specific structural opt-outs from RESEARCH_NOTES.md §QD-3 ---
+# Block 0 sinkhorn cascade risk documented in RISKS_AND_OPEN_QUESTIONS.md A-3
+model.layers.0.hc_attn_fn
+model.layers.0.hc_attn_base
+model.layers.0.hc_attn_scale
+model.layers.0.hc_ffn_fn
+model.layers.0.hc_ffn_base
+model.layers.0.hc_ffn_scale
+
+# --- 10. Defensive coverage of theoretical aliases ---
+#.weight  # DO NOT blanket-skip; included for readability only (commented)
+embed_tokens
+lm_head
