@@ -1,16 +1,29 @@
-# DeepSeek-V4-Flash-0731 — Hybrid W4A16-AWQ Toolkit
+# DeepSeek-V4-Flash-0731 — AWQ INT4 Quantization Toolkit
 
 Quantize `deepseek-ai/DeepSeek-V4-Flash-0731` (304 B MoE, native FP4 experts
 + FP8 activations + DSpark speculative head) into a **W4A16**-AWQ checkpoint
 loadable by vLLM (`deep_gemm_mega_moe` backend) and SGLang (`flashinfer_mxfp4`
 backend).
 
+## Quick start (Intel XPU node)
+
+```bash
+MODEL=/path/to/deepseek-v4-flash-snapshot \
+WORK=$PWD/.work \
+GPUS=8 \
+bash recipes/deepseek_v4_flash/run.sh
+```
+
+See `recipes/deepseek_v4_flash/README.md` for the reasoning behind every step.
+
 ## Status
 
-✅ Recipe and ignore-pattern generators reviewed.
-✅ Pipeline plumbing covered by `scripts/smoke_test_surrogate.py`.
-✅ Deterministic calibration prep implemented.
-⚠️  Full 304 B run **not** included — needs ≥200 GB GPU.
+✅ **Model-specific recipe** at `recipes/deepseek_v4_flash/` — modeled on the proven
+   Intel XPU Ornith 1.5 recipe from `~/work/model-compression`.
+✅ Requantization pre-pass (`upcast_source`) verified against synthetic FP4/FP8 fixtures.
+✅ Preflight correctly identifies the source as compressed-or-quantized.
+✅ DSpark head grafting, container-module ignore cleanup, packed-tensor verification.
+⚠️  Full 304 B run requires an Intel XPU node (≥200 GB accelerator VRAM total).
 ⚠️  Eval harness (FP8 baseline vs W4A16-AWQ deltas) pending; see
     `RISKS_AND_OPEN_QUESTIONS.md`.
 
@@ -33,8 +46,18 @@ backend).
 │   ├── requirements.txt              (pinned deps)
 │   └── Dockerfile                    (NGC PyTorch base image)
 ├── recipes/
-│   ├── hybrid_w4a16.yaml             (the AWQ-W4A16 recipe)
-│   └── moe_ignore_patterns.txt       (regex ignore list)
+│   ├── deepseek_v4_flash/              (⭐ model-specific Intel XPU recipe)
+│   │   ├── awq_int4.py                 (main runner)
+│   │   ├── run.sh                      (containerized entrypoint)
+│   │   ├── parallel_awq.py             (multi-XPU AWQ grid partitioner)
+│   │   ├── resumable_pipeline.py       (layer-checkpointed sequential pipeline)
+│   │   ├── README.md                   (reasoning per design choice)
+│   │   └── requirements.lock           (pinned deps for --no-deps install)
+│   ├── hybrid_w4a16.yaml               (generic AWQ-W4A16 recipe)
+│   └── moe_ignore_patterns.txt         (regex ignore list)
+├── model_compress/                     (preflight + environment verification)
+│   ├── preflight.py                    (inspect source before loading tensors)
+│   └── verify_environment.py           (confirm torch+xpu intact post-install)
 ├── scripts/
 │   ├── upcast_to_bf16.py             (FP4/FP8 → BF16 mirror)
 │   ├── quantize_llmcompressor.py     (driver: oneshot AWQ sweep)
