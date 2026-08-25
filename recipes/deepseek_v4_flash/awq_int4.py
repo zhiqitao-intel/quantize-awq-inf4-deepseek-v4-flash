@@ -192,12 +192,14 @@ def upcast_source(source_dir, work_dir):
         """Dispatch based on key pattern + dtype. Returns dense tensor."""
         if key.endswith(".scale"):
             return None  # caller filters
-        # FP4-packed routed/shared experts: uint8 storage, w{1,2,3}.weight key
+        # FP4-packed routed/shared experts: int8 storage, w{1,2,3}.weight key
+        # (safetensors reports I8 as torch.int8; treat as unsigned nibbles)
         if (
-            tensor.dtype == torch.uint8
+            tensor.dtype in (torch.uint8, torch.int8)
             and ".experts." in key
             and re.search(r"\.w[123]\.weight$", key)
         ):
+            tensor = tensor.view(torch.uint8) if tensor.dtype == torch.int8 else tensor
             dense = unpack_fp4(tensor)
             if scale is not None:
                 # Broadcast per-block scales back onto the expanded shape.
