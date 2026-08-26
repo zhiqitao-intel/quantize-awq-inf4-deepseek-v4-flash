@@ -112,29 +112,58 @@ def patch_linear_dtype_mismatch():
     """AWQ's scale computation runs in float32; model weights are bfloat16.
 
     During calibration forward passes through quantized Linears,
-    compressed-tensors' quantized_forward calls F.linear(input, weight)
-    directly. When AWQ has wrapped the module's weight with a float32
-    scale tensor, input arrives as float32 while weight stays bfloat16,
-    raising "expected m1 and m2 to have the same dtype".
+    compressed-tensors' quantized_forward dispatches to whatever primitive
+    the module's own forward uses. Two paths matter in DeepSeek-V4:
 
-    Wrapping F.linear to upcast the narrower operand resolves this without
-    meaningful numeric change (bf16 → fp32 is exact).
+      1. standard nn.Linear → F.linear(input, weight)
+      2. DeepseekV4GroupedLinear (o_a_proj) → torch.bmm(x, w).transpose(0,1)
+
+    When AWQ wraps weight with a float32 scale tensor, activations arrive
+    as float32 while the underlying weight stays bfloat16, raising
+    "expected m1 and m2 to have the same dtype". Patch both primitives to
+    promote the narrower operand via torch.promote_types — bf16 → fp32 is
+    exact so no numeric change.
     """
     import torch.nn.functional as F
-    original = F.linear
+
+    # --- F.linear ---
+    original_linear = F.linear
 
     def _auto_cast_linear(input, weight, bias=None):
         if input.dtype != weight.dtype:
             target = torch.promote_types(input.dtype, weight.dtype)
-            return original(
+            return original_linear(
                 input.to(target),
                 weight.to(target),
                 None if bias is None else bias.to(target),
             )
-        return original(input, weight, bias)
+        return original_linear(input, weight, bias)
 
     F.linear = _auto_cast_linear
-    print("patched F.linear to auto-cast mixed dtypes")
+
+    # --- torch.bmm (used by DeepseekV4GroupedLinear) ---
+    original_bmm = torch.bmm
+
+    def _auto_cast_bmm(a, b, *, out=None):
+        if a.dtype != b.dtype:
+            target = torch.promote_types(a.dtype, b.dtype)
+            return original_bmm(a.to(target), b.to(target), out=out)
+        return original_bmm(a, b, out=out)
+
+    torch.bmm = _auto_cast_bmm
+
+    # --- torch.mm (defensive: same class of bug on 2D matmul path) ---
+    original_mm = torch.mm
+
+    def _auto_cast_mm(a, b, *, out=None):
+        if a.dtype != b.dtype:
+            target = torch.promote_types(a.dtype, b.dtype)
+            return original_mm(a.to(target), b.to(target), out=out)
+        return original_mm(a, b, out=out)
+
+    torch.mm = _auto_cast_mm
+
+    print("patched F.linear / torch.bmm / torch.mm to auto-cast mixed dtypes")
 
 
 CODE_DATASET = "codeparrot/self-instruct-starcoder"
