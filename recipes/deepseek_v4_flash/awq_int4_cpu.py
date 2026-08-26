@@ -217,6 +217,17 @@ def get_calib_dataset(tokenizer, n_samples, seed, code_fraction=0.7):
     parts = []
 
     def tokenize(messages):
+        # DeepSeek-V4 does NOT ship a Jinja chat template; it uses its own
+        # encoding_dsv4.py encoder. Use that to produce a faithful prompt string,
+        # then tokenize it with the base tokenizer.
+        if getattr(tokenizer, "chat_template", None) is None:
+            try:
+                import encoding_dsv4 as _enc
+                prompt = _enc.encode_messages(messages, thinking_mode="chat")
+                ids = tokenizer.encode(prompt, add_special_tokens=False)
+                return {"input_ids": list(ids)}
+            except Exception:
+                pass
         out = tokenizer.apply_chat_template(
             messages, tokenize=True, return_dict=True, add_generation_prompt=False
         )
@@ -358,6 +369,8 @@ def main():
     ap.add_argument("--max-layers", type=int,
                    help="truncate at N decoder layers (POC mode)")
     ap.add_argument("--skip-upcast", action="store_true")
+    ap.add_argument("--with-awq", action="store_true",
+                    help="enable AWQ grid search (AWQModifier); very slow on CPU")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -432,7 +445,7 @@ def main():
 
     # Note: we skip the AWQModifier on CPU by default since grid search is
     # extremely slow. Set --with-awq to enable it anyway.
-    if "--with-awq" in sys.argv:
+    if args.with_awq:
         from llmcompressor.modifiers.transform.awq import AWQModifier
         recipe.insert(0, AWQModifier(duo_scaling=False, n_grid=args.n_grid))
         print("AWQ grid search enabled")
