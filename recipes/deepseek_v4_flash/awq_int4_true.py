@@ -108,6 +108,35 @@ from awq_int4_cpu import (  # noqa: E402
 )
 
 
+def patch_linear_dtype_mismatch():
+    """AWQ's scale computation runs in float32; model weights are bfloat16.
+
+    During calibration forward passes through quantized Linears,
+    compressed-tensors' quantized_forward calls F.linear(input, weight)
+    directly. When AWQ has wrapped the module's weight with a float32
+    scale tensor, input arrives as float32 while weight stays bfloat16,
+    raising "expected m1 and m2 to have the same dtype".
+
+    Wrapping F.linear to upcast the narrower operand resolves this without
+    meaningful numeric change (bf16 → fp32 is exact).
+    """
+    import torch.nn.functional as F
+    original = F.linear
+
+    def _auto_cast_linear(input, weight, bias=None):
+        if input.dtype != weight.dtype:
+            target = torch.promote_types(input.dtype, weight.dtype)
+            return original(
+                input.to(target),
+                weight.to(target),
+                None if bias is None else bias.to(target),
+            )
+        return original(input, weight, bias)
+
+    F.linear = _auto_cast_linear
+    print("patched F.linear to auto-cast mixed dtypes")
+
+
 CODE_DATASET = "codeparrot/self-instruct-starcoder"
 CODE_SPLIT = "curated"
 CHAT_DATASET = "HuggingFaceH4/ultrachat_200k"
@@ -222,6 +251,7 @@ def main():
 
     torch.manual_seed(args.seed)
     disable_pin_memory_without_cuda()
+    patch_linear_dtype_mismatch()
     register_deepseek_v4_awq_mappings()
 
     work_dir = args.work_dir or (args.output.rstrip("/") + ".work")
