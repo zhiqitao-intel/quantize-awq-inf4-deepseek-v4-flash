@@ -227,6 +227,47 @@ def patch_linear_dtype_mismatch():
           "Tensor.matmul + @ to auto-cast mixed dtypes")
 
 
+def patch_grouped_linear_signature():
+    """Align DeepseekV4GroupedLinear.forward's parameter name with what
+    compressed-tensors' quantized_forward expects.
+
+    AWQ's activation cache keys captured inputs by the *original* forward's
+    parameter names via inspect.signature(). For DeepseekV4GroupedLinear
+    that's `forward(self, x)` → cache key "x". But once the module is
+    quantized, its forward becomes compressed-tensors' quantized_forward
+    which declares `forward(self, input)` → invocation kwarg must be
+    "input". AWQ then calls module(**{"x": ...}) which raises
+    TypeError: unexpected keyword argument 'x'.
+
+    Fix: replace each instance's forward with a fresh function whose first
+    non-self parameter IS named `input`. No @wraps (that would copy the old
+    signature). inspect.signature() on the new function sees `input`,
+    matching what quantized_forward will declare.
+    """
+    import types
+
+    patched_count = 0
+
+    def _patch_model_modules(model):
+        nonlocal patched_count
+        for mod in model.modules():
+            if type(mod).__name__ != "DeepseekV4GroupedLinear":
+                continue
+            orig_forward = mod.forward
+
+            # Define a fresh function; do NOT use functools.wraps.
+            def _forward_with_input(input, *args, **kwargs):
+                return orig_forward(input, *args, **kwargs)
+
+            mod.forward = _forward_with_input
+            patched_count += 1
+
+    def _get_count():
+        return patched_count
+
+    return _patch_model_modules, _get_count
+
+
 CODE_DATASET = "codeparrot/self-instruct-starcoder"
 CODE_SPLIT = "curated"
 CHAT_DATASET = "HuggingFaceH4/ultrachat_200k"
@@ -364,6 +405,13 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         mirror_dir, dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True
     )
+
+    # Align DeepseekV4GroupedLinear's forward signature with what
+    # compressed-tensors' quantized_forward expects (param name `input`).
+    patch_grouped_linear, get_patched_count = patch_grouped_linear_signature()
+    patch_grouped_linear(model)
+    print(f"aligned DeepseekV4GroupedLinear.forward signature on "
+          f"{get_patched_count()} modules")
 
     ignore = collect_ignore_list(model)
     print(f"ignore list: {len(ignore)} entries")
