@@ -111,59 +111,120 @@ from awq_int4_cpu import (  # noqa: E402
 def patch_linear_dtype_mismatch():
     """AWQ's scale computation runs in float32; model weights are bfloat16.
 
-    During calibration forward passes through quantized Linears,
-    compressed-tensors' quantized_forward dispatches to whatever primitive
-    the module's own forward uses. Two paths matter in DeepSeek-V4:
+    During calibration forward passes through quantized modules, activations
+    arrive as float32 while underlying weights stay bfloat16. DeepSeek-V4
+    hits this across multiple primitives because its custom modules use
+    different matmul entry points:
 
-      1. standard nn.Linear → F.linear(input, weight)
-      2. DeepseekV4GroupedLinear (o_a_proj) → torch.bmm(x, w).transpose(0,1)
+      - nn.Linear                    → F.linear
+      - DeepseekV4GroupedLinear      → torch.bmm (o_a_proj)
+      - HyperConnector mixing        → torch.matmul (lines 1145/1151)
+      - attention QK/OV              → torch.matmul (lines 729/743)
+      - various                      → torch.addmm / torch.baddbmm / Tensor@
 
-    When AWQ wraps weight with a float32 scale tensor, activations arrive
-    as float32 while the underlying weight stays bfloat16, raising
-    "expected m1 and m2 to have the same dtype". Patch both primitives to
-    promote the narrower operand via torch.promote_types — bf16 → fp32 is
-    exact so no numeric change.
+    Patch every matmul-family primitive with the same promote_types
+    auto-cast. bf16 → fp32 is exact so no numeric change.
     """
-    import torch.nn.functional as F
+
+    def _promote(a, b):
+        if a.dtype != b.dtype:
+            t = torch.promote_types(a.dtype, b.dtype)
+            return a.to(t), b.to(t)
+        return a, b
 
     # --- F.linear ---
-    original_linear = F.linear
+    _orig_linear = F_linear = torch.nn.functional.linear
 
-    def _auto_cast_linear(input, weight, bias=None):
+    def _auto_linear(input, weight, bias=None):
         if input.dtype != weight.dtype:
-            target = torch.promote_types(input.dtype, weight.dtype)
-            return original_linear(
-                input.to(target),
-                weight.to(target),
-                None if bias is None else bias.to(target),
-            )
-        return original_linear(input, weight, bias)
+            i, w = _promote(input, weight)
+            b = bias.to(i.dtype) if bias is not None else None
+            return _orig_linear(i, w, b)
+        return _orig_linear(input, weight, bias)
 
-    F.linear = _auto_cast_linear
+    torch.nn.functional.linear = _auto_linear
 
-    # --- torch.bmm (used by DeepseekV4GroupedLinear) ---
-    original_bmm = torch.bmm
+    # --- torch.bmm ---
+    _orig_bmm = torch.bmm
 
-    def _auto_cast_bmm(a, b, *, out=None):
+    def _auto_bmm(a, b, *, out=None):
         if a.dtype != b.dtype:
-            target = torch.promote_types(a.dtype, b.dtype)
-            return original_bmm(a.to(target), b.to(target), out=out)
-        return original_bmm(a, b, out=out)
+            a, b = _promote(a, b)
+        return _orig_bmm(a, b, out=out)
 
-    torch.bmm = _auto_cast_bmm
+    torch.bmm = _auto_bmm
 
-    # --- torch.mm (defensive: same class of bug on 2D matmul path) ---
-    original_mm = torch.mm
+    # --- torch.mm ---
+    _orig_mm = torch.mm
 
-    def _auto_cast_mm(a, b, *, out=None):
+    def _auto_mm(a, b, *, out=None):
         if a.dtype != b.dtype:
-            target = torch.promote_types(a.dtype, b.dtype)
-            return original_mm(a.to(target), b.to(target), out=out)
-        return original_mm(a, b, out=out)
+            a, b = _promote(a, b)
+        return _orig_mm(a, b, out=out)
 
-    torch.mm = _auto_cast_mm
+    torch.mm = _auto_mm
 
-    print("patched F.linear / torch.bmm / torch.mm to auto-cast mixed dtypes")
+    # --- torch.matmul ---
+    _orig_matmul = torch.matmul
+
+    def _auto_matmul(a, b, *, out=None):
+        if a.dtype != b.dtype:
+            a, b = _promote(a, b)
+        return _orig_matmul(a, b, out=out)
+
+    torch.matmul = _auto_matmul
+
+    # --- torch.addmm ---
+    _orig_addmm = torch.addmm
+
+    def _auto_addmm(bias, a, b, *, beta=1, alpha=1, out=None):
+        if a.dtype != b.dtype or bias.dtype != a.dtype:
+            target = torch.promote_types(torch.promote_types(a.dtype, b.dtype),
+                                         bias.dtype)
+            return _orig_addmm(bias.to(target), a.to(target), b.to(target),
+                               beta=beta, alpha=alpha, out=out)
+        return _orig_addmm(bias, a, b, beta=beta, alpha=alpha, out=out)
+
+    torch.addmm = _auto_addmm
+
+    # --- torch.baddbmm ---
+    _orig_baddbmm = torch.baddbmm
+
+    def _auto_baddbmm(bias, a, b, *, beta=1, alpha=1, out=None):
+        if a.dtype != b.dtype or bias.dtype != a.dtype:
+            target = torch.promote_types(torch.promote_types(a.dtype, b.dtype),
+                                         bias.dtype)
+            return _orig_baddbmm(bias.to(target), a.to(target), b.to(target),
+                                 beta=beta, alpha=alpha, out=out)
+        return _orig_baddbmm(bias, a, b, beta=beta, alpha=alpha, out=out)
+
+    torch.baddbmm = _auto_baddbmm
+
+    # --- Tensor.matmul / @ operator ---
+    _orig_tensor_matmul = torch.Tensor.matmul
+
+    def _auto_tensor_matmul(self, other):
+        if self.dtype != other.dtype:
+            a, b = _promote(self, other)
+            return _orig_tensor_matmul(a, b)
+        return _orig_tensor_matmul(self, other)
+
+    torch.Tensor.matmul = _auto_tensor_matmul
+
+    # --- Tensor.__matmul__ (the @ operator; dispatches separately from
+    #     .matmul() and from torch.matmul) ---
+    _orig_dunder_matmul = torch.Tensor.__matmul__
+
+    def _auto_dunder_matmul(self, other):
+        if isinstance(other, torch.Tensor) and self.dtype != other.dtype:
+            a, b = _promote(self, other)
+            return _orig_dunder_matmul(a, b)
+        return _orig_dunder_matmul(self, other)
+
+    torch.Tensor.__matmul__ = _auto_dunder_matmul
+
+    print("patched F.linear + bmm + mm + matmul + addmm + baddbmm + "
+          "Tensor.matmul + @ to auto-cast mixed dtypes")
 
 
 CODE_DATASET = "codeparrot/self-instruct-starcoder"
