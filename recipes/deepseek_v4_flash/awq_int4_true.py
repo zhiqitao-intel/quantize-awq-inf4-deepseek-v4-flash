@@ -239,10 +239,11 @@ def patch_grouped_linear_signature():
     "input". AWQ then calls module(**{"x": ...}) which raises
     TypeError: unexpected keyword argument 'x'.
 
-    Fix: replace each instance's forward with a fresh function whose first
-    non-self parameter IS named `input`. No @wraps (that would copy the old
-    signature). inspect.signature() on the new function sees `input`,
-    matching what quantized_forward will declare.
+    Fix: replace each instance's forward with a *bound method* whose first
+    non-self parameter IS named `input`. Plain function assignment would
+    leave mod.forward.__func__ undefined, which compressed-tensors'
+    set_forward_quantized needs for @wraps. types.MethodType binding gives
+    us both: inspect.signature sees `input` AND __func__ exists.
     """
     import types
 
@@ -255,11 +256,12 @@ def patch_grouped_linear_signature():
                 continue
             orig_forward = mod.forward
 
-            # Define a fresh function; do NOT use functools.wraps.
-            def _forward_with_input(input, *args, **kwargs):
+            # Define with explicit self so MethodType binding works
+            def _forward_with_input(self, input, *args, **kwargs):
                 return orig_forward(input, *args, **kwargs)
 
-            mod.forward = _forward_with_input
+            # Bind as a method: keeps __func__ valid for @wraps downstream
+            mod.forward = types.MethodType(_forward_with_input, mod)
             patched_count += 1
 
     def _get_count():
