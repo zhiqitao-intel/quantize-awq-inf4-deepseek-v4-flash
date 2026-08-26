@@ -55,22 +55,21 @@ def register_deepseek_v4_awq_mappings():
         return  # already registered
 
     AWQ_MAPPING_REGISTRY["DeepseekV4ForCausalLM"] = [
-        # input_layernorm feeds q_a_proj and kv_proj (MLA down-projections)
+        # input_layernorm (4096) feeds q_a_proj and kv_proj (both in=4096)
         AWQMapping(
             smooth_layer="re:.*input_layernorm$",
             balance_layers=["re:.*self_attn\\.q_a_proj$", "re:.*self_attn\\.kv_proj$"],
         ),
-        # q_a_norm feeds q_b_proj (q up-projection)
+        # q_a_norm (q_lora_rank=1024) feeds q_b_proj (in=q_lora_rank=1024)
         AWQMapping(
             smooth_layer="re:.*self_attn\\.q_a_norm$",
             balance_layers=["re:.*self_attn\\.q_b_proj$"],
         ),
-        # kv_norm feeds o_a_proj (post-attention spread)
-        AWQMapping(
-            smooth_layer="re:.*self_attn\\.kv_norm$",
-            balance_layers=["re:.*self_attn\\.o_a_proj$"],
-        ),
-        # post_attention_layernorm feeds router gate + first expert projections
+        # NOTE: no kv_norm mapping. kv_norm normalizes head_dim=512 (the
+        # compressed KV), but o_a_proj consumes 4096-wide grouped attention
+        # output. No Linear in this architecture takes a 512-dim input that
+        # kv_norm feeds, so there is nothing valid to pair it with.
+        # post_attention_layernorm (4096) feeds router gate + expert projections
         AWQMapping(
             smooth_layer="re:.*post_attention_layernorm$",
             balance_layers=[
@@ -81,7 +80,7 @@ def register_deepseek_v4_awq_mappings():
                 "re:.*mlp\\.shared_experts\\.up_proj$",
             ],
         ),
-        # w3 -> w2 within each expert (SwiGLU pairing)
+        # SwiGLU pairing: up_proj output (=2048) matches down_proj input
         AWQMapping(
             smooth_layer="re:.*mlp\\.experts\\.\\d+\\.up_proj$",
             balance_layers=["re:.*mlp\\.experts\\.\\d+\\.down_proj$"],
